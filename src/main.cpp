@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
+#include <bitset>
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -34,6 +35,23 @@
 
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
+
+std::bitset<4> readCols(){
+  std::bitset<4> result;
+  // Set all row select addresses low
+  digitalWrite(RA0_PIN, 0);
+  digitalWrite(RA1_PIN, 0);
+  digitalWrite(RA2_PIN, 0);
+
+  // Set row select enable high
+  digitalWrite(REN_PIN, 1);
+
+  result[0] = digitalRead(C0_PIN);
+  result[1] = digitalRead(C1_PIN);
+  result[2] = digitalRead(C2_PIN);
+  result[3] = digitalRead(C3_PIN);
+  return result;
+}
 
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
@@ -82,7 +100,6 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
   static uint32_t next = millis();
-  static uint32_t count = 0;
 
   while (millis() < next);  //Wait for next interval
 
@@ -91,9 +108,9 @@ void loop() {
   //Update display
   u8g2.clearBuffer();         // clear the internal memory
   u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  u8g2.drawStr(2,10,"Helllo World!");  // write something to the internal memory
+  std::bitset<4> inputs = readCols();
   u8g2.setCursor(2,20);
-  u8g2.print(count++);
+  u8g2.print(inputs.to_ulong(), HEX);
   u8g2.sendBuffer();          // transfer internal memory to the display
 
   //Toggle LED
