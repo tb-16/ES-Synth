@@ -36,20 +36,26 @@
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
-std::bitset<4> readCols(){
-  std::bitset<4> result;
-  // Set all row select addresses low
-  digitalWrite(RA0_PIN, 0);
-  digitalWrite(RA1_PIN, 0);
-  digitalWrite(RA2_PIN, 0);
+void setRow(uint8_t rowIdx) {
+  // Set row select enable low
+  digitalWrite(REN_PIN, LOW);
+
+  digitalWrite(RA0_PIN, rowIdx & 0x01);
+  digitalWrite(RA1_PIN, (rowIdx >> 1) & 0x01);
+  digitalWrite(RA2_PIN, (rowIdx >> 2) & 0x01);
+
 
   // Set row select enable high
-  digitalWrite(REN_PIN, 1);
+  digitalWrite(REN_PIN, HIGH);
+}
 
-  result[0] = digitalRead(C0_PIN);
-  result[1] = digitalRead(C1_PIN);
-  result[2] = digitalRead(C2_PIN);
-  result[3] = digitalRead(C3_PIN);
+std::bitset<4> readCols(){
+  std::bitset<4> result;
+
+  result[0] = !digitalRead(C0_PIN);
+  result[1] = !digitalRead(C1_PIN);
+  result[2] = !digitalRead(C2_PIN);
+  result[3] = !digitalRead(C3_PIN);
   return result;
 }
 
@@ -105,10 +111,20 @@ void loop() {
 
   next += interval;
 
+  std::bitset<32> inputs;
+
   //Update display
   u8g2.clearBuffer();         // clear the internal memory
   u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  std::bitset<4> inputs = readCols();
+  for (uint8_t row = 0; row < 3; row++) {
+    setRow(row);
+    delayMicroseconds(3);
+    std::bitset<4> rowInputs = readCols();
+
+    for (uint8_t col = 0; col < 4; col++) {
+      inputs[row * 4 + col] = rowInputs[col];
+    }
+  }
   u8g2.setCursor(2,20);
   u8g2.print(inputs.to_ulong(), HEX);
   u8g2.sendBuffer();          // transfer internal memory to the display
