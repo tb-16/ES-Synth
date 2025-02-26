@@ -39,7 +39,7 @@ struct {
 
 class Knob {
   public:
-    Knob(int8_t lowerLimit = 0, int8_t upperLimit = 8)
+    Knob(uint8_t lowerLimit = 0, uint8_t upperLimit = 8)
       : _rotation(0), _lowerLimit(lowerLimit), _upperLimit(upperLimit), _lastDelta(0), _lastState(0)
     {
       _mutex = xSemaphoreCreateMutex();
@@ -105,7 +105,8 @@ const int8_t Knob::transitionTable[16] = {
     2,  2,  1,  0
 };
 
-Knob knob3;
+Knob knob2(-3, 3);
+Knob knob3(0, 8);
 
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 HardwareTimer sampleTimer(TIM1);
@@ -160,7 +161,7 @@ void setOutMuxBit(const uint8_t bitIdx, const bool value) {
 void sampleISR() {
   static uint32_t phaseAcc = 0;
   uint32_t localStep = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
-  uint8_t localVolume = knob3.read();
+  uint8_t localVolume = knob3.read(); // Should this get cast
   phaseAcc += localStep;
   int32_t Vout = (phaseAcc >> 24) - 128;
   Vout = Vout >> (8 - localVolume);
@@ -168,7 +169,6 @@ void sampleISR() {
 }
 
 void scanKeysTask(void *pvParameters) {
-  static uint8_t prevAB = 0;
   const TickType_t xFrequency = 10 / portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   while(1) {
@@ -187,27 +187,29 @@ void scanKeysTask(void *pvParameters) {
     uint32_t localCurrentStepSize = 0;
     for (uint8_t i = 0; i < 12; i++) {
       if (localInputs[i]) {
-        localCurrentStepSize = stepSizes[i];
         anyKeyPressed = true;
         lastKeyIndex = i;
+        localCurrentStepSize = stepSizes[i];
       }
     }
-    uint8_t BA = 0;
-    BA |= (localInputs[13] << 1);
-    BA |= (localInputs[12] << 0);
-    Serial.print("BA: ");
-    Serial.println(BA, BIN);
-    
+    uint8_t BA_Knob2 = (localInputs[15] << 1) | (localInputs[14] << 0);
+    knob2.update(BA_Knob2);
+    int8_t octave = knob2.read();
+    if (anyKeyPressed) {
+      if (octave >= 0) {
+        localCurrentStepSize <<= octave;
+      } else {
+        localCurrentStepSize >>= -octave;
+      }
+    }     
+    uint8_t BA_Knob3 = (localInputs[13] << 1) | (localInputs[12] << 0);
+    knob3.update(BA_Knob3);
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     sysState.inputs = localInputs;
     sysState.anyKeyPressed = anyKeyPressed;
     sysState.lastKeyIndex = lastKeyIndex;
     xSemaphoreGive(sysState.mutex);
-    
-    knob3.update(BA);
-    
     __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
-    prevAB = BA;
   }
 }
 
@@ -222,6 +224,7 @@ void displayUpdateTask(void *pvParameters) {
     bool localAnyKeyPressed = sysState.anyKeyPressed;
     xSemaphoreGive(sysState.mutex);
     int8_t localKnob3Rotation = knob3.read();
+    int8_t localKnob2Rotation = knob2.read(); 
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_ncenB08_tr);
     u8g2.setCursor(2, 10);
@@ -235,6 +238,7 @@ void displayUpdateTask(void *pvParameters) {
     }
     u8g2.setCursor(2, 30);
     u8g2.print(localKnob3Rotation);
+    u8g2.print(localKnob2Rotation);
     u8g2.sendBuffer();
     digitalToggle(LED_BUILTIN);
   }
@@ -267,7 +271,7 @@ void setup() {
   sysState.mutex = xSemaphoreCreateMutex();
   TaskHandle_t scanKeysHandle = NULL;
   TaskHandle_t displayUpdateHandle = NULL;
-  xTaskCreate(scanKeysTask, "scanKeys", 64, NULL, 2, &scanKeysHandle);
+  xTaskCreate(scanKeysTask, "scanKeys", 92, NULL, 2, &scanKeysHandle);
   xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
   vTaskStartScheduler();
 }
