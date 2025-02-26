@@ -4,13 +4,6 @@
 #include <HardwareTimer.h>
 #include <STM32FreeRTOS.h>
 
-struct {
-  std::bitset<32> inputs;
-  bool anyKeyPressed;
-  uint8_t lastKeyIndex;
-  SemaphoreHandle_t mutex;
-} sysState;
-
 const uint32_t interval = 100;
 const int RA0_PIN = D3;
 const int RA1_PIN = D6;
@@ -37,6 +30,83 @@ const char* noteNames[12] = {
   "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
 };
 
+struct {
+  std::bitset<32> inputs;
+  bool anyKeyPressed;
+  uint8_t lastKeyIndex;
+  SemaphoreHandle_t mutex;
+} sysState;
+
+class Knob {
+  public:
+    Knob(int8_t lowerLimit = 0, int8_t upperLimit = 8)
+      : _rotation(0), _lowerLimit(lowerLimit), _upperLimit(upperLimit), _lastDelta(0), _lastState(0)
+    {
+      _mutex = xSemaphoreCreateMutex();
+    }
+    
+    ~Knob() {
+      if (_mutex != NULL) {
+        vSemaphoreDelete(_mutex);
+      }
+    }
+    
+    void update(uint8_t BA) {
+      xSemaphoreTake(_mutex, portMAX_DELAY);
+      uint8_t transition = (_lastState << 2) | BA;
+      int8_t knobDelta = transitionTable[transition];
+      if (knobDelta == 2) {
+        knobDelta = _lastDelta;
+      }
+      _lastDelta = knobDelta;
+      _lastState = BA;
+      int8_t expected = __atomic_load_n(&_rotation, __ATOMIC_RELAXED);
+      int8_t desired;
+      do {
+          desired = expected + knobDelta;
+          if (desired < _lowerLimit) desired = _lowerLimit;
+          if (desired > _upperLimit) desired = _upperLimit;
+      } while (!__atomic_compare_exchange_n(&_rotation, &expected, desired, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+      xSemaphoreGive(_mutex);
+    }
+    
+    void setLimits(int8_t lower, int8_t upper) {
+      xSemaphoreTake(_mutex, portMAX_DELAY);
+      _lowerLimit = lower;
+      _upperLimit = upper;
+      int8_t current = __atomic_load_n(&_rotation, __ATOMIC_RELAXED);
+      if (current < _lowerLimit) {
+          __atomic_store_n(&_rotation, _lowerLimit, __ATOMIC_RELAXED);
+      } else if (current > _upperLimit) {
+          __atomic_store_n(&_rotation, _upperLimit, __ATOMIC_RELAXED);
+      }
+      xSemaphoreGive(_mutex);
+    }
+    
+    int8_t read() {
+      return __atomic_load_n(&_rotation, __ATOMIC_RELAXED);
+    }
+  
+  private:
+    int8_t _rotation;
+    int8_t _lowerLimit;
+    int8_t _upperLimit;
+    int8_t _lastDelta;
+    int8_t _lastState;
+    SemaphoreHandle_t _mutex;
+  
+    static const int8_t transitionTable[16];
+};
+
+const int8_t Knob::transitionTable[16] = {
+    0,  1,  2,  2,
+   -1,  0,  2,  2,
+    2,  2,  0, -1,
+    2,  2,  1,  0
+};
+
+Knob knob3;
+
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 HardwareTimer sampleTimer(TIM1);
 
@@ -56,7 +126,7 @@ uint32_t stepSizes[12] = {
   computeStepSize(BASE_FREQ * pow(2.0, -1.0/12.0)),
   computeStepSize(BASE_FREQ),
   computeStepSize(BASE_FREQ * pow(2.0, 1.0/12.0)),
-  computeStepSize(BASE_FREQ * pow(2.0, 2.0/12.0)),
+  computeStepSize(BASE_FREQ * pow(2.0, 2.0/12.0))
 };
 
 void setRow(uint8_t rowIdx) {
@@ -67,7 +137,7 @@ void setRow(uint8_t rowIdx) {
   digitalWrite(REN_PIN, HIGH);
 }
 
-std::bitset<4> readCols(){
+std::bitset<4> readCols() {
   std::bitset<4> result;
   result[0] = !digitalRead(C0_PIN);
   result[1] = !digitalRead(C1_PIN);
@@ -90,19 +160,21 @@ void setOutMuxBit(const uint8_t bitIdx, const bool value) {
 void sampleISR() {
   static uint32_t phaseAcc = 0;
   uint32_t localStep = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
+  uint8_t localVolume = knob3.read();
   phaseAcc += localStep;
   int32_t Vout = (phaseAcc >> 24) - 128;
-  // Factor 8 scaling to be less loud
-  analogWrite(OUTR_PIN, Vout/8 + 128);
+  Vout = Vout >> (8 - localVolume);
+  analogWrite(OUTR_PIN, Vout + 128);
 }
 
 void scanKeysTask(void *pvParameters) {
-  const TickType_t xFrequency = 50 / portTICK_PERIOD_MS;
+  static uint8_t prevAB = 0;
+  const TickType_t xFrequency = 10 / portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   while(1) {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
     std::bitset<32> localInputs;
-    for (uint8_t row = 0; row < 3; row++) {
+    for (uint8_t row = 0; row < 4; row++) {
       setRow(row);
       delayMicroseconds(3);
       std::bitset<4> rowInputs = readCols();
@@ -120,13 +192,22 @@ void scanKeysTask(void *pvParameters) {
         lastKeyIndex = i;
       }
     }
+    uint8_t BA = 0;
+    BA |= (localInputs[13] << 1);
+    BA |= (localInputs[12] << 0);
+    Serial.print("BA: ");
+    Serial.println(BA, BIN);
+    
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     sysState.inputs = localInputs;
     sysState.anyKeyPressed = anyKeyPressed;
     sysState.lastKeyIndex = lastKeyIndex;
     xSemaphoreGive(sysState.mutex);
-
+    
+    knob3.update(BA);
+    
     __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
+    prevAB = BA;
   }
 }
 
@@ -135,24 +216,25 @@ void displayUpdateTask(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   while(1) {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
-
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     std::bitset<32> localInputs = sysState.inputs;
     uint8_t localLastKey = sysState.lastKeyIndex;
     bool localAnyKeyPressed = sysState.anyKeyPressed;
     xSemaphoreGive(sysState.mutex);
-
+    int8_t localKnob3Rotation = knob3.read();
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_ncenB08_tr);
-    u8g2.setCursor(2, 20);
+    u8g2.setCursor(2, 10);
     u8g2.print(localInputs.to_ulong(), HEX);
-    u8g2.setCursor(2, 30);
+    u8g2.setCursor(2, 20);
     if (localAnyKeyPressed) {
       u8g2.print("Note: ");
       u8g2.print(noteNames[localLastKey]);
     } else {
       u8g2.print("Note: None");
     }
+    u8g2.setCursor(2, 30);
+    u8g2.print(localKnob3Rotation);
     u8g2.sendBuffer();
     digitalToggle(LED_BUILTIN);
   }
@@ -185,8 +267,8 @@ void setup() {
   sysState.mutex = xSemaphoreCreateMutex();
   TaskHandle_t scanKeysHandle = NULL;
   TaskHandle_t displayUpdateHandle = NULL;
-  xTaskCreate(scanKeysTask,"scanKeys",64,NULL,2,&scanKeysHandle);
-  xTaskCreate(displayUpdateTask,"displayUpdate",256,NULL,1,&displayUpdateHandle);
+  xTaskCreate(scanKeysTask, "scanKeys", 64, NULL, 2, &scanKeysHandle);
+  xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
   vTaskStartScheduler();
 }
 
