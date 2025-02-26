@@ -8,6 +8,7 @@ struct {
   std::bitset<32> inputs;
   bool anyKeyPressed;
   uint8_t lastKeyIndex;
+  SemaphoreHandle_t mutex;
 } sysState;
 
 const uint32_t interval = 100;
@@ -109,7 +110,6 @@ void scanKeysTask(void *pvParameters) {
         localInputs[row * 4 + col] = rowInputs[col];
       }
     }
-    sysState.inputs = localInputs;
     bool anyKeyPressed = false;
     uint8_t lastKeyIndex = 0;
     uint32_t localCurrentStepSize = 0;
@@ -120,8 +120,12 @@ void scanKeysTask(void *pvParameters) {
         lastKeyIndex = i;
       }
     }
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    sysState.inputs = localInputs;
     sysState.anyKeyPressed = anyKeyPressed;
     sysState.lastKeyIndex = lastKeyIndex;
+    xSemaphoreGive(sysState.mutex);
+
     __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   }
 }
@@ -131,14 +135,21 @@ void displayUpdateTask(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   while(1) {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
+
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    std::bitset<32> localInputs = sysState.inputs;
+    uint8_t localLastKey = sysState.lastKeyIndex;
+    bool localAnyKeyPressed = sysState.anyKeyPressed;
+    xSemaphoreGive(sysState.mutex);
+
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_ncenB08_tr);
     u8g2.setCursor(2, 20);
-    u8g2.print(sysState.inputs.to_ulong(), HEX);
+    u8g2.print(localInputs.to_ulong(), HEX);
     u8g2.setCursor(2, 30);
-    if (sysState.anyKeyPressed) {
+    if (localAnyKeyPressed) {
       u8g2.print("Note: ");
-      u8g2.print(noteNames[sysState.lastKeyIndex]);
+      u8g2.print(noteNames[localLastKey]);
     } else {
       u8g2.print("Note: None");
     }
@@ -171,6 +182,7 @@ void setup() {
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
+  sysState.mutex = xSemaphoreCreateMutex();
   TaskHandle_t scanKeysHandle = NULL;
   TaskHandle_t displayUpdateHandle = NULL;
   xTaskCreate(scanKeysTask,"scanKeys",64,NULL,2,&scanKeysHandle);
