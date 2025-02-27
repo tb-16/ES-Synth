@@ -22,9 +22,15 @@ const int DEN_BIT = 3;
 const int DRST_BIT = 4;
 const int HKOW_BIT = 5;
 const int HKOE_BIT = 6;
+
 const uint32_t FS = 22000;
 constexpr float BASE_FREQ = 440.0;
 volatile uint32_t currentStepSize = 0;
+
+constexpr uint8_t NUM_NOTES = 12;
+volatile bool notePressed[NUM_NOTES] = {false};
+volatile uint32_t noteStepSizes[NUM_NOTES] = {0};
+volatile uint32_t phaseAccumulators[NUM_NOTES] = {0};
 
 const char* noteNames[12] = {
   "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
@@ -159,13 +165,24 @@ void setOutMuxBit(const uint8_t bitIdx, const bool value) {
 }
 
 void sampleISR() {
-  static uint32_t phaseAcc = 0;
-  uint32_t localStep = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
-  uint8_t localVolume = knob3.read(); // Should this get cast
-  phaseAcc += localStep;
-  int32_t Vout = (phaseAcc >> 24) - 128;
-  Vout = Vout >> (8 - localVolume);
-  analogWrite(OUTR_PIN, Vout + 128);
+  static uint32_t phaseAccumulators[12] = {0};
+  uint8_t localVolume = knob3.read();
+  int32_t mix = 0;
+
+  for (uint8_t i = 0; i < 12; i++) {
+    if (notePressed[i]) {
+      phaseAccumulators[i] += noteStepSizes[i];
+      int32_t s = (phaseAccumulators[i] >> 24) - 128;
+      mix += s;
+    }
+  }
+
+  mix >>= (8 - localVolume);
+  mix += 128;
+  if (mix < 0)   mix = 0;
+  if (mix > 255) mix = 255;
+
+  analogWrite(OUTR_PIN, (uint8_t)mix);
 }
 
 void scanKeysTask(void *pvParameters) {
@@ -186,13 +203,15 @@ void scanKeysTask(void *pvParameters) {
     uint8_t lastKeyIndex = 0;
     uint32_t localCurrentStepSize = 0;
     for (uint8_t i = 0; i < 12; i++) {
-      if (localInputs[i]) {
+      bool pressed = localInputs[i];
+      notePressed[i] = pressed;
+      if (pressed) {
         anyKeyPressed = true;
         lastKeyIndex = i;
         localCurrentStepSize = stepSizes[i];
       }
     }
-    uint8_t BA_Knob2 = (localInputs[15] << 1) | (localInputs[14] << 0);
+    uint8_t BA_Knob2 = (localInputs[15] << 1) | (localInputs[14]);
     knob2.update(BA_Knob2);
     int8_t octave = knob2.read();
     if (anyKeyPressed) {
@@ -201,8 +220,21 @@ void scanKeysTask(void *pvParameters) {
       } else {
         localCurrentStepSize >>= -octave;
       }
-    }     
-    uint8_t BA_Knob3 = (localInputs[13] << 1) | (localInputs[12] << 0);
+    }
+    for (uint8_t i = 0; i < 12; i++) {
+      if (notePressed[i]) {
+        uint32_t baseStep = stepSizes[i];
+        if (octave >= 0) {
+          baseStep <<= octave;
+        } else {
+          baseStep >>= -octave;
+        }
+        noteStepSizes[i] = baseStep;
+      } else {
+        noteStepSizes[i] = 0;
+      }
+    }
+    uint8_t BA_Knob3 = (localInputs[13] << 1) | (localInputs[12]);
     knob3.update(BA_Knob3);
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     sysState.inputs = localInputs;
