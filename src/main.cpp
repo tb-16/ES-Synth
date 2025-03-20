@@ -56,6 +56,79 @@ volatile bool anyKeyPressed = false;
 volatile uint8_t lastKeyIndex = 0;
 
 static void MX_ADC1_Init(void);
+U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
+
+
+struct UI{
+  uint32_t menu_page_num =0;
+  uint32_t page_move_distance =0;
+  int8_t calibration_x =0;
+  int8_t calibration_y =0;
+  char buf[64];
+  char line_update[64];
+  int i = 0;
+  int j = 0;
+  int kernal_x =0;
+};
+
+struct VOLUME{
+  uint8_t volume_input = 26;
+  uint8_t volume_width = 5;  
+  uint8_t volume_height = 28;  
+  uint8_t volume_value = 28-volume_input; // max volume is 28
+};
+
+struct ProgressBox{
+  uint8_t x = 0;
+  uint8_t y = 0;
+  uint8_t w = 0;
+  uint8_t h = 0;
+  uint8_t prgress = 0;
+  char* text [32];
+  uint8_t x_text = 0;
+  uint8_t y_text = 0;
+};
+
+struct SysState{
+  bool filter_state =0;
+  uint8_t octave;
+};
+
+struct ADSR_Box {
+  uint8_t x, y, w, h;
+  char text [32];
+  float progress;
+  uint8_t offset_x;
+};
+
+SysState sysState;
+VOLUME volume;
+UI ui;
+
+ADSR_Box adsr_boxes[] = {
+  {13, 2, 53, 13, "Attack", 0.3, 3},
+  {13, 17, 53, 13, "Decay", 0.7, 3},
+  {69, 2, 53, 13, "Sustain", 0.4, 0},
+  {69, 17, 53, 13, "Release", 0.5, 0}
+};
+
+void render_adsr_menu() {
+  u8g2.setDrawColor( 1);
+  for (int i = 0; i < 4; i++) {
+      u8g2.drawRFrame(adsr_boxes[i].x, adsr_boxes[i].y, adsr_boxes[i].w, adsr_boxes[i].h, 4);
+      u8g2.setDrawColor(2);
+      u8g2.drawStr(adsr_boxes[i].x+7 + adsr_boxes[i].offset_x, adsr_boxes[i].y + 10, adsr_boxes[i].text);
+  }
+}
+
+void render_adsr_progress_bar(){
+  for(int i = 0; i < 4; i++){
+    u8g2.drawBox(adsr_boxes[i].x+1, adsr_boxes[i].y+1, (adsr_boxes[i].w-2)*adsr_boxes[i].progress/10.0,adsr_boxes[i].h-2);
+  }
+}
+
+
+
 
 class Knob {
 public:
@@ -110,9 +183,12 @@ const int8_t Knob::transitionTable[16] = {
     2,   2,   1,   0
 };
 
-Knob knob2(-3, 3, 0);
-Knob knob3(0, 8, 4);
-U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
+Knob knob0(0, 10, 0);
+Knob knob1(0, 10, 0);
+Knob knob2(0, 10, 0);
+Knob knob3(0, 10, 0);
+// Knob knob2(-3, 3, 0); //knob2 is for the octives
+// Knob knob3(0, 8, 4);
 HardwareTimer sampleTimer(TIM1);
 
 constexpr uint32_t computeStepSize(float freq) {
@@ -184,6 +260,12 @@ void sampleISR() {
     if (mix < 0)   mix = 0;
     if (mix > 255) mix = 255;
     analogWrite(OUTR_PIN, (uint8_t)mix);
+    // adsr_boxes[0].progress = knob2.read();
+    // adsr_boxes[1].progress = knob3.read();
+    adsr_boxes[0].progress = knob0.read();
+    adsr_boxes[1].progress = knob1.read();    
+    adsr_boxes[2].progress = knob2.read();
+    adsr_boxes[3].progress = knob3.read();
 }
 
 void scanKeysTask(void* pvParameters) {
@@ -191,7 +273,8 @@ void scanKeysTask(void* pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
-        std::bitset<16> localInputs;
+        // std::bitset<16> localInputs;
+        std::bitset<32> localInputs;
         for (uint8_t row = 0; row < 4; row++) {
             setRow(row);
             delayMicroseconds(3);
@@ -212,11 +295,21 @@ void scanKeysTask(void* pvParameters) {
             }
         }
         __atomic_store_n(&pressedMask, localMask, __ATOMIC_RELAXED);
+        uint8_t BA_Knob0 = (localInputs[19] << 1) | (localInputs[18]);
+        uint8_t BA_Knob1 = (localInputs[17] << 1) | (localInputs[16]);
         uint8_t BA_Knob2 = (localInputs[15] << 1) | (localInputs[14]);
         uint8_t BA_Knob3 = (localInputs[13] << 1) | (localInputs[12]);
+        knob0.update(BA_Knob0);
+        knob1.update(BA_Knob1);
         knob2.update(BA_Knob2);
         knob3.update(BA_Knob3);
-        int8_t octave = knob2.read();
+        // __atomic_store_n(&pressedMask, localMask, __ATOMIC_RELAXED);
+        // uint8_t BA_Knob2 = (localInputs[15] << 1) | (localInputs[14]);
+        // uint8_t BA_Knob3 = (localInputs[13] << 1) | (localInputs[12]);
+        // knob2.update(BA_Knob2);
+        // knob3.update(BA_Knob3);
+        // int8_t octave = knob2.read();
+        int8_t octave = 0;
         for (uint8_t i = 0; i < 12; i++) {
             if (localMask & (1 << i)) {
                 uint32_t baseStep = baseStepSizes[i];
@@ -256,24 +349,36 @@ void displayUpdateTask(void* pvParameters) {
         uint16_t localPressedMask = __atomic_load_n(&pressedMask, __ATOMIC_RELAXED);
         int8_t localVol = knob3.read();
         int8_t localOct = knob2.read();
-        u8g2.clearBuffer();
+        // u8g2.clearBuffer();
+        // u8g2.setFont(u8g2_font_ncenB08_tr);
+        // u8g2.setCursor(2, 10);
+        // u8g2.print("Pressed: 0x");
+        // u8g2.print(localPressedMask, HEX);
+        // u8g2.setCursor(2, 20);
+        // if (localAnyKeyPressed) {
+        //     u8g2.print("Note: ");
+        //     u8g2.print(noteNames[localLastKey]);
+        // } else {
+        //     u8g2.print("Note: None");
+        // }
+        // u8g2.setCursor(2, 30);
+        // u8g2.print("Vol=");
+        // u8g2.print(adcValue1);
+        // u8g2.print("  Oct=");
+        // u8g2.print(adcValue2);
+        // u8g2.sendBuffer();
+
+        u8g2.clearBuffer();       
         u8g2.setFont(u8g2_font_ncenB08_tr);
-        u8g2.setCursor(2, 10);
-        u8g2.print("Pressed: 0x");
-        u8g2.print(localPressedMask, HEX);
-        u8g2.setCursor(2, 20);
-        if (localAnyKeyPressed) {
-            u8g2.print("Note: ");
-            u8g2.print(noteNames[localLastKey]);
-        } else {
-            u8g2.print("Note: None");
-        }
-        u8g2.setCursor(2, 30);
-        u8g2.print("Vol=");
-        u8g2.print(adcValue1);
-        u8g2.print("  Oct=");
-        u8g2.print(adcValue2);
+        u8g2.drawRFrame(10,0,115,32,4);
+        u8g2.drawPixel( ui.calibration_x, ui.calibration_y);
+        u8g2.drawBox( 2,2+volume.volume_value,volume.volume_width,volume.volume_height-volume.volume_value);
+        u8g2.drawFrame(0,0,volume.volume_width+4,volume.volume_height+4);
+        render_adsr_menu();
+        render_adsr_progress_bar();
         u8g2.sendBuffer();
+
+
         digitalToggle(LED_BUILTIN);
     }
 }
